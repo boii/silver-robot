@@ -1,20 +1,10 @@
 """GPT Promo Grabber: pure-HTTP code harvester.
 
-Flow:
-  1. License check against the project's licensing service.
-  2. Solve reCAPTCHA via CapSolver (sitekey + URL hardcoded, base64).
-  3. POST email + token to the upstream promo endpoint.
-  4. Parse `code` from the JSON response, append to codes.txt.
-
-Bandwidth ~10-30 KB per run.
-Total time ~CapSolver time + a couple seconds of HTTP overhead.
-
 Author : @putrm   (https://t.me/putrm)
 Buy    : https://t.me/putrm
 """
 
 import argparse
-import base64
 import json
 import os
 import pathlib
@@ -51,49 +41,34 @@ except ImportError:  # pragma: no cover
 
 console = Console() if _HAS_RICH else None
 
-# License client. See license_client.py.
 from license_client import LicenseClient, LicenseError
+from _codec import _u as _r
 
 # Credits / contact (kept as constants so the banner stays in sync)
 APP_NAME = "GPT Promo Grabber"
 AUTHOR_HANDLE = "@putrm"
 CONTACT_URL = "https://t.me/putrm"
 
-# License config baked into the build. End-users only supply LICENSE_KEY in
-# their .env. URL / signing key / product name are hardcoded so they can't
-# be redirected to a fake server. Do NOT rotate LICENSE_SIGNING_KEY after
-# release; every existing client would reject server responses.
-LICENSE_API_URL = "https://license.kin.my.id"
-LICENSE_SIGNING_KEY = "46fb461acea1f62c4dcb1c0ee74c131dd45c2db54e4f21007d113237c1b6f548"
-PRODUCT_ID = "gptcode"
+# Runtime constants are sourced from _codec at module load to keep them out
+# of grep-able plaintext. Do not assign them to easy-to-spot identifiers.
+_S0 = _r(0)   # signing material
+_S1 = _r(1)   # service endpoint
+_S2 = _r(2)   # bucket name (also config dirname)
+_S3 = _r(3)   # captcha site key
+_S4 = _r(4)   # upstream submit url
+_S5 = _r(5)   # captcha host page url
+_S6 = _r(6)   # referer origin
+_S7 = _r(7)   # solver create-task url
+_S8 = _r(8)   # solver poll url
 
-# Persistent storage for the activated key (lives next to machine.id under
-# the user's config dir, NOT in .env, so it survives even when users
-# overwrite their .env from .env.example).
-LICENSE_CONFIG_DIR = pathlib.Path.home() / ".config" / PRODUCT_ID
-LICENSE_KEY_FILE = LICENSE_CONFIG_DIR / "license.key"
+PRODUCT_ID = _S2
 
-# Strict mode: revalidate against the server every N seconds while the app
-# is doing real work. If a re-check fails (revoked, expired, network down,
-# signature mismatch...), running workers bail out on their next iteration.
-LICENSE_RECHECK_SECONDS = 60
+# Persistent storage for the activated entitlement.
+_STATE_DIR = pathlib.Path.home() / (".config/" + _S2)
+_STATE_FILE = _STATE_DIR / "k.dat"
 
-# Endpoints discovered during the original network capture are stored here as
-# base64. Not real encryption: the goal is just to keep the source clean of
-# obvious branded strings so casual greps don't match. Decoded at startup.
-_E = base64.b64decode
-
-SUBMIT_URL = _E(
-    "aHR0cHM6Ly93d3cuYmJ2YWRlc2N1ZW50b3MubXgvYWRtaW4tc2l0ZS9waHAvX2h0dHByZXF1ZXN0LnBocA=="
-).decode()
-RECAPTCHA_SITE_URL = _E(
-    "aHR0cHM6Ly93d3cuYmJ2YWRlc2N1ZW50b3MubXgvZGV2ZWxvcC9vcGVuYWktM21zYw=="
-).decode()
-RECAPTCHA_REFERER_ORIGIN = _E("aHR0cHM6Ly93d3cuYmJ2YWRlc2N1ZW50b3MubXg=").decode()
-RECAPTCHA_SITE_KEY = "6LfG0tIsAAAAAINTtPyFHgumY1_U11qbAxQuzh7O"
-
-CAPSOLVER_CREATE_TASK_URL = "https://api.capsolver.com/createTask"
-CAPSOLVER_GET_RESULT_URL = "https://api.capsolver.com/getTaskResult"
+# Period (seconds) for the in-process integrity loop.
+_HEARTBEAT_PERIOD = 60
 
 CODES_FILE = "codes.txt"
 ERROR_LOG_FILE = "errors.txt"
@@ -103,7 +78,7 @@ _FILE_LOCK = threading.Lock()
 
 # Per-thread HTTP sessions to reuse TCP/TLS connections across requests.
 # Each worker gets:
-#   - session_direct  : direct calls (CapSolver API). Never proxied.
+#   - session_direct  : direct calls (solver API). Never proxied.
 #   - session_proxied : calls to the target site. Routed through DataImpulse.
 # Goal: TLS handshake once per host, all subsequent requests reuse the socket.
 _THREAD_LOCAL = threading.local()
@@ -210,10 +185,10 @@ def print_banner():
 
 
 def _load_saved_key():
-    """Read the saved license key from disk. Returns None if not yet stored."""
+    """Read the persisted token from disk. Returns None if absent."""
     try:
-        if LICENSE_KEY_FILE.exists():
-            key = LICENSE_KEY_FILE.read_text(encoding="utf-8").strip()
+        if _STATE_FILE.exists():
+            key = _STATE_FILE.read_text(encoding="utf-8").strip()
             return key or None
     except OSError:
         pass
@@ -221,34 +196,33 @@ def _load_saved_key():
 
 
 def _save_key(key):
-    """Persist the key under the user's config dir, mode 600 where supported."""
+    """Persist the token under the user's state dir, mode 600 where supported."""
     try:
-        LICENSE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        LICENSE_KEY_FILE.write_text(key.strip() + "\n", encoding="utf-8")
-        # Best-effort tighten perms (no-op on Windows but harmless).
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _STATE_FILE.write_text(key.strip() + "\n", encoding="utf-8")
         try:
-            os.chmod(LICENSE_KEY_FILE, 0o600)
+            os.chmod(_STATE_FILE, 0o600)
         except OSError:
             pass
     except OSError as exc:
-        log_warn(f"Could not persist license key to {LICENSE_KEY_FILE}: {exc}")
+        log_warn(f"Could not persist token to {_STATE_FILE}: {exc}")
 
 
 def _clear_saved_key():
-    """Remove a stored key, e.g. after the server tells us it's invalid."""
+    """Drop the persisted token, e.g. after the service rejects it."""
     try:
-        if LICENSE_KEY_FILE.exists():
-            LICENSE_KEY_FILE.unlink()
+        if _STATE_FILE.exists():
+            _STATE_FILE.unlink()
     except OSError:
         pass
 
 
 def _prompt_for_key():
-    """Interactively ask the user for a license key. Returns the trimmed key."""
+    """Interactively ask the user for a token. Returns the trimmed value."""
     if not sys.stdin.isatty():
         log_error(
-            "No license key on file and no interactive terminal to ask for one. "
-            f"Set LICENSE_KEY in .env or run interactively. Buy a key at {CONTACT_URL}"
+            "No access token on file and no TTY to ask for one. "
+            f"Set LICENSE_KEY in .env or run interactively. {CONTACT_URL}"
         )
         sys.exit(2)
 
@@ -257,52 +231,44 @@ def _prompt_for_key():
         console.print(
             Panel(
                 Text.from_markup(
-                    "[bold]No license key on file.[/bold]\n"
+                    "[bold]No access token on file.[/bold]\n"
                     f"Buy or top up at [bold green]{CONTACT_URL}[/bold green]"
                 ),
-                title="[bold yellow]License activation[/bold yellow]",
+                title="[bold yellow]Activation[/bold yellow]",
                 border_style="yellow",
                 padding=(0, 1),
             )
         )
     else:
         print()
-        print("=== License activation ===")
+        print("=== Activation ===")
         print(f"Buy or top up at {CONTACT_URL}")
 
     while True:
         try:
-            entered = input("Enter your license key: ").strip()
+            entered = input("Enter your access token: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             sys.exit(130)
         if entered:
             return entered
-        print("Key cannot be empty.")
+        print("Token cannot be empty.")
 
 
-def check_license_or_exit():
-    """Validate the license before doing any real work.
+def _bootstrap():
+    """Run the startup integrity check. Exits the process on failure.
 
-    Strict mode: the server MUST be reachable on every startup and MUST
-    return valid=True. There is no offline grace, and a stored key that
-    the server later rejects is wiped immediately.
-
-    Lookup order for the key:
+    Lookup order for the token:
       1. LICENSE_KEY in .env (override)
-      2. license.key file under the user's config dir
-      3. Interactive prompt (TTY only)
-
-    Side effect: on success, sets the module-level _LICENSE_CLIENT and
-    _LICENSE_KEY so background re-checks can keep validating.
+      2. persisted file under the user's state dir
+      3. interactive prompt (TTY only)
     """
-    global _LICENSE_CLIENT, _LICENSE_KEY
+    global _GATE, _TOKEN
 
     client = LicenseClient(
-        api_url=LICENSE_API_URL,
-        signing_key=LICENSE_SIGNING_KEY,
+        api_url=_S1,
+        signing_key=_S0,
         product=PRODUCT_ID,
-        # Strict mode does not use offline grace.
         offline_grace_days=0,
     )
 
@@ -316,20 +282,16 @@ def check_license_or_exit():
         fresh_input = True
 
     while True:
-        # 1) Bind / refresh activation. activate is idempotent on the
-        #    server for the same (key, machine_id), so calling it on every
-        #    start is fine and gives us a fresh signed payload.
         try:
             res = client.activate(key)
         except LicenseError as exc:
-            log_error(f"License signature mismatch: {exc}")
+            log_error(f"Integrity check failed: {exc}")
             _clear_saved_key()
             sys.exit(2)
         except requests.RequestException as exc:
-            # Strict: no offline grace. Refuse to start.
             log_error(
-                f"License server unreachable: {exc}. "
-                "Strict mode requires an online check on every startup."
+                f"Service unreachable: {exc}. "
+                "An online check is required on every startup."
             )
             sys.exit(2)
 
@@ -337,7 +299,7 @@ def check_license_or_exit():
             status = res.get("status", "invalid")
             if not fresh_input and sys.stdin.isatty():
                 log_warn(
-                    f"Stored license key was rejected (status={status}). Asking again."
+                    f"Stored token rejected (status={status}). Asking again."
                 )
                 _clear_saved_key()
                 saved_key = None
@@ -345,39 +307,34 @@ def check_license_or_exit():
                 fresh_input = True
                 continue
             log_error(
-                f"License rejected (status={status}). Need help? Contact {CONTACT_URL}"
+                f"Token rejected (status={status}). {CONTACT_URL}"
             )
             _clear_saved_key()
             sys.exit(2)
 
-        # 2) Belt-and-braces: confirm the server still says this machine
-        #    is good with a separate validate call. Catches the (rare)
-        #    case where activation succeeds but the slot is already
-        #    flagged elsewhere.
         try:
             chk = client.validate(key)
         except LicenseError as exc:
-            log_error(f"License signature mismatch on validate: {exc}")
+            log_error(f"Integrity check failed: {exc}")
             _clear_saved_key()
             sys.exit(2)
         except requests.RequestException as exc:
-            log_error(f"License server unreachable on validate: {exc}.")
+            log_error(f"Service unreachable: {exc}.")
             sys.exit(2)
 
         if not chk.get("valid"):
             status = chk.get("status", "invalid")
             log_error(
-                f"License validate failed (status={status}). Contact {CONTACT_URL}"
+                f"Token rejected (status={status}). {CONTACT_URL}"
             )
             _clear_saved_key()
             sys.exit(2)
 
-        # 3) Persist and report.
         if not saved_key or saved_key != key:
             _save_key(key)
 
-        _LICENSE_CLIENT = client
-        _LICENSE_KEY = key
+        _GATE = client
+        _TOKEN = key
 
         if console is not None:
             info = chk.get("license") or res.get("license") or {}
@@ -389,81 +346,73 @@ def check_license_or_exit():
                 else "lifetime"
             )
             console.print(
-                f"[green]License OK[/green] [dim]({product_name}, expires {expires_str}, strict mode)[/dim]"
+                f"[green]Ready[/green] [dim]({product_name}, expires {expires_str})[/dim]"
             )
         return
 
 
-# === Strict-mode runtime re-checking ===
+# === Background heartbeat ===
 
-_LICENSE_CLIENT: "LicenseClient | None" = None
-_LICENSE_KEY: "str | None" = None
-_LICENSE_REVOKED = threading.Event()
-_LICENSE_RECHECK_THREAD: "threading.Thread | None" = None
-_LICENSE_RECHECK_STOP = threading.Event()
-
-
-def license_is_revoked():
-    """Return True if a background re-check has flagged the license bad."""
-    return _LICENSE_REVOKED.is_set()
+_GATE: "LicenseClient | None" = None
+_TOKEN: "str | None" = None
+_HALT_FLAG = threading.Event()
+_BEAT_THREAD: "threading.Thread | None" = None
+_BEAT_STOP = threading.Event()
 
 
-def _license_recheck_loop():
-    """Periodically validate the license while the app is doing real work.
+def _should_halt():
+    """Return True when the heartbeat has flagged a problem."""
+    return _HALT_FLAG.is_set()
 
-    Trips _LICENSE_REVOKED on the first failure so worker threads can bail.
-    """
-    if _LICENSE_CLIENT is None or not _LICENSE_KEY:
+
+def _heartbeat_loop():
+    """Periodically re-verify with the service while work is in progress."""
+    if _GATE is None or not _TOKEN:
         return
 
-    while not _LICENSE_RECHECK_STOP.wait(LICENSE_RECHECK_SECONDS):
+    while not _BEAT_STOP.wait(_HEARTBEAT_PERIOD):
         try:
-            res = _LICENSE_CLIENT.validate(_LICENSE_KEY)
+            res = _GATE.validate(_TOKEN)
         except LicenseError:
-            log_error("License signature mismatch during re-check. Halting.")
-            _LICENSE_REVOKED.set()
+            log_error("Integrity drift detected. Halting.")
+            _HALT_FLAG.set()
             return
         except requests.RequestException as exc:
-            log_error(
-                f"License server unreachable during re-check: {exc}. "
-                "Halting (strict mode has no offline grace)."
-            )
-            _LICENSE_REVOKED.set()
+            log_error(f"Service unreachable mid-run: {exc}. Halting.")
+            _HALT_FLAG.set()
             return
 
         if not res.get("valid"):
             status = res.get("status", "invalid")
-            log_error(
-                f"License revoked mid-run (status={status}). Halting workers."
-            )
+            log_error(f"Token revoked mid-run (status={status}). Halting workers.")
             _clear_saved_key()
-            _LICENSE_REVOKED.set()
+            _HALT_FLAG.set()
             return
 
 
-def start_license_watchdog():
-    """Spin up the background re-check thread (daemon)."""
-    global _LICENSE_RECHECK_THREAD
-    if _LICENSE_CLIENT is None or _LICENSE_RECHECK_THREAD is not None:
+def _arm_heartbeat():
+    """Spin up the background heartbeat thread (daemon)."""
+    global _BEAT_THREAD
+    if _GATE is None or _BEAT_THREAD is not None:
         return
-    _LICENSE_RECHECK_STOP.clear()
-    _LICENSE_REVOKED.clear()
+    _BEAT_STOP.clear()
+    _HALT_FLAG.clear()
     t = threading.Thread(
-        target=_license_recheck_loop,
-        name="license-watchdog",
+        target=_heartbeat_loop,
+        name="heartbeat",
         daemon=True,
     )
     t.start()
-    _LICENSE_RECHECK_THREAD = t
+    _BEAT_THREAD = t
 
 
-def stop_license_watchdog():
-    """Signal the watchdog to exit. Called when work is finished."""
-    global _LICENSE_RECHECK_THREAD
-    _LICENSE_RECHECK_STOP.set()
-    if _LICENSE_RECHECK_THREAD is not None:
-        _LICENSE_RECHECK_THREAD.join(timeout=2)
-        _LICENSE_RECHECK_THREAD = None
+def _disarm_heartbeat():
+    """Signal the heartbeat to exit. Called when work is finished."""
+    global _BEAT_THREAD
+    _BEAT_STOP.set()
+    if _BEAT_THREAD is not None:
+        _BEAT_THREAD.join(timeout=2)
+        _BEAT_THREAD = None
 
 
 def main():
@@ -471,7 +420,7 @@ def main():
     load_dotenv()
 
     print_banner()
-    check_license_or_exit()
+    _bootstrap()
 
     domains = parse_domains(os.getenv("EMAIL_DOMAINS"))
     capsolver_api_key = (os.getenv("CAPSOLVER_API_KEY") or "").strip()
@@ -507,7 +456,7 @@ def main():
     t_start = time.time()
     results = []  # list of dicts per run: {run_id, ok, code, email, duration, error}
 
-    start_license_watchdog()
+    _arm_heartbeat()
     try:
         if console is not None:
             with Progress(
@@ -556,7 +505,7 @@ def main():
 
                 if workers == 1:
                     for i in range(runs):
-                        if license_is_revoked():
+                        if _should_halt():
                             break
                         r = _execute_one(i + 1)
                         results.append(r)
@@ -587,7 +536,7 @@ def main():
             # Plain fallback when rich is missing
             if workers == 1:
                 for i in range(runs):
-                    if license_is_revoked():
+                    if _should_halt():
                         break
                     ok, code, email, err = run_single_quiet(
                         run_id=i + 1,
@@ -624,7 +573,7 @@ def main():
                         )
                         print(f"[run {run_id}] {'OK' if ok else 'FAIL'} -> {code or err}")
     finally:
-        stop_license_watchdog()
+        _disarm_heartbeat()
 
     total = time.time() - t_start
     success = sum(1 for r in results if r["ok"])
@@ -632,8 +581,8 @@ def main():
 
     _print_summary(results, total, success, failed, runs)
 
-    if license_is_revoked():
-        log_error("Stopped early because the license is no longer valid.")
+    if _should_halt():
+        log_error("Stopped early due to integrity check failure.")
         sys.exit(2)
     if failed and not success:
         sys.exit(1)
@@ -692,8 +641,8 @@ def run_single_quiet(run_id, domains, capsolver_api_key, capsolver_timeout, prox
 
     Returns: (ok: bool, code_url: str|None, email: str|None, error: str|None)
     """
-    if license_is_revoked():
-        return False, None, None, "License revoked"
+    if _should_halt():
+        return False, None, None, "halted"
 
     email = generate_email(random.choice(domains))
     run_proxy = _proxy_with_unique_session(proxy_config, run_id)
@@ -701,8 +650,8 @@ def run_single_quiet(run_id, domains, capsolver_api_key, capsolver_timeout, prox
     try:
         token = solve_recaptcha_v2(
             api_key=capsolver_api_key,
-            website_url=RECAPTCHA_SITE_URL,
-            website_key=RECAPTCHA_SITE_KEY,
+            website_url=_S5,
+            website_key=_S3,
             timeout=capsolver_timeout,
             proxy_config=run_proxy,
         )
@@ -785,8 +734,8 @@ def submit_to_upstream(email, captcha_token, proxy_config=None):
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "es-MX,es;q=0.9",
-        "Origin": RECAPTCHA_REFERER_ORIGIN,
-        "Referer": RECAPTCHA_SITE_URL,
+        "Origin": _S6,
+        "Referer": _S5,
     }
 
     files = {
@@ -797,7 +746,7 @@ def submit_to_upstream(email, captcha_token, proxy_config=None):
 
     session = _get_proxied_session(proxy_config)
     res = session.post(
-        SUBMIT_URL,
+        _S4,
         headers=headers,
         files=files,
         timeout=30,
@@ -844,11 +793,11 @@ class CapSolverError(Exception):
 
 
 def solve_recaptcha_v2(api_key, website_url, website_key, timeout=180, poll_interval=1, proxy_config=None):
-    """Create a ReCaptchaV2 task on CapSolver and return the gRecaptchaResponse.
+    """Create a captcha task with the upstream solver and return the token.
 
-    Note: requests to api.capsolver.com always go direct (never proxied) so
+    Note: requests to the solver API always go direct (never proxied) so
     they don't burn proxy bandwidth. proxy_config is forwarded as a task
-    parameter so CapSolver itself egresses through that proxy.
+    parameter so the solver itself egresses through that proxy.
     """
     if proxy_config:
         task = {
@@ -872,7 +821,7 @@ def solve_recaptcha_v2(api_key, website_url, website_key, timeout=180, poll_inte
     create_payload = {"clientKey": api_key, "task": task}
 
     session = _get_direct_session()
-    res = session.post(CAPSOLVER_CREATE_TASK_URL, json=create_payload, timeout=30)
+    res = session.post(_S7, json=create_payload, timeout=30)
     res.raise_for_status()
     data = res.json()
 
@@ -893,7 +842,7 @@ def solve_recaptcha_v2(api_key, website_url, website_key, timeout=180, poll_inte
     deadline = time.time() + timeout
     while time.time() < deadline:
         result = session.post(
-            CAPSOLVER_GET_RESULT_URL,
+            _S8,
             json={"clientKey": api_key, "taskId": task_id},
             timeout=30,
         )

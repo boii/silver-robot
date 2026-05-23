@@ -1,9 +1,9 @@
 # GPT Promo Grabber
 
 Pure-HTTP code harvester. Multi-threaded, optional DataImpulse proxy,
-CapSolver-backed reCAPTCHA v2.
+captcha-solver-backed reCAPTCHA v2.
 
-> by **@putrm**  |  buy a license: <https://t.me/putrm>
+> by **@putrm**  |  buy access: <https://t.me/putrm>
 
 ## Features
 
@@ -11,20 +11,20 @@ CapSolver-backed reCAPTCHA v2.
 - Multi-thread workers with shared TCP/TLS connections.
 - Optional DataImpulse rotating proxy with sticky sub-sessions per worker.
 - Rich UI progress bar / summary, with a plain-text fallback.
-- License gate with HMAC-signed responses, online check on every startup,
-  and a background watchdog that re-validates while work is in progress.
+- Online integrity check on every startup, with a background heartbeat
+  while work is in progress.
 
 ## Quick start (Windows)
 
 1. Run `run.bat`. On first launch it creates a venv, installs the
    requirements, and copies `.env.example` to `.env`.
 2. Fill in `.env`:
-   - `CAPSOLVER_API_KEY` - from <https://dashboard.capsolver.com>.
+   - `CAPSOLVER_API_KEY` - your captcha solver key.
    - `EMAIL_DOMAINS` - comma-separated list, e.g. `example.com,example.org`.
    - DataImpulse credentials if you want to proxy upstream traffic.
-   - `LICENSE_KEY` is **optional**: if left blank, the app prompts for the
-     key on first run and saves it under `~/.config/gptcode/license.key`
-     so later runs start silently.
+   - `LICENSE_KEY` is **optional**: if blank, the app prompts on first
+     run and stores the token in your user state dir so later runs start
+     silently.
 3. Run `run.bat` again. Pick how many codes and how many parallel workers.
 
 You can also pass flags directly:
@@ -35,34 +35,15 @@ run.bat -n 50 -w 5
 
 ## Files
 
-| Path                | Role                                                      |
-|---------------------|-----------------------------------------------------------|
-| `main.py`           | Entry point: license check, worker pool, summary          |
-| `license_client.py` | License client (HMAC-verified)                            |
-| `_prompt.py`        | Interactive prompt invoked by `run.bat`                   |
-| `run.bat`           | Setup + launcher (single batch file)                      |
-| `.env.example`      | Sample env config                                         |
-| `codes.txt`         | Harvested codes, appended one per line                    |
-| `errors.txt`        | Error log (ignored if `codes.txt` is what you care about) |
-
-## License gating
-
-The gate is enforced inside `main.py:check_license_or_exit()`:
-
-- `POST /v1/activate` on first run, `POST /v1/validate` on subsequent runs.
-- The first time the app starts, it prompts for the license key and stores
-  it at `~/.config/gptcode/license.key` (alongside the per-machine
-  `machine.id`). Later runs read it back automatically.
-- Strict mode: every startup must reach the server and pass both
-  `activate` and `validate`. There is no offline grace. While work is in
-  progress, a background watchdog re-validates every 60 seconds and
-  halts running workers on the first failure (revoked, expired,
-  signature mismatch, network error). A rejected stored key is wiped
-  from disk so the next run prompts again.
-- Every response is signed with HMAC-SHA256. The shared secret is baked
-  into `main.py` at build time, alongside the server URL and product id.
-
-Buy or top up a key at <https://t.me/putrm>.
+| Path                | Role                                       |
+|---------------------|--------------------------------------------|
+| `main.py`           | Entry point: worker pool, summary          |
+| `license_client.py` | Signed-RPC client                          |
+| `_codec.py`         | Internal byte tables                       |
+| `_prompt.py`        | Interactive prompt invoked by `run.bat`    |
+| `run.bat`           | Setup + launcher (single batch file)       |
+| `codes.txt`         | Harvested codes, appended one per line     |
+| `errors.txt`        | Error log                                  |
 
 ## Credits
 

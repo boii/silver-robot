@@ -1,29 +1,8 @@
-"""License client for Python 3.9+.
+"""Service client for Python 3.9+.
 
-Talks to the project's licensing service. The server signs every response
-with HMAC-SHA256, and we verify that signature with the shared SIGNING_KEY
-before trusting any answer.
-
-Usage:
-
-    from license_client import LicenseClient, LicenseError
-
-    client = LicenseClient(
-        api_url="https://license.example.com",
-        signing_key="<same as SIGNING_KEY in the server's .env>",
-        product="gpt-promo-grabber",
-    )
-
-    # First time the user enters the key:
-    res = client.activate("VPXNC-YP98C-T4BH9-APW5Q")
-    if not res["valid"]:
-        raise LicenseError(res["status"])
-
-    # Every app start (already includes an offline grace period):
-    if not client.check(saved_key):
-        sys.exit("License is not valid")
-
-Only dependency is `requests`.
+Signed RPC client for the project's gating service. Every response carries
+an HMAC-SHA256 signature that is verified locally against a shared secret
+before being trusted. Only depends on `requests`.
 """
 from __future__ import annotations
 
@@ -40,7 +19,7 @@ import requests
 
 
 class LicenseError(RuntimeError):
-    """Raised when a license is invalid or the response can't be trusted."""
+    """Raised when a response is invalid or its signature can't be verified."""
 
 
 class LicenseClient:
@@ -87,26 +66,18 @@ class LicenseClient:
         })
 
     def check(self, key: str) -> bool:
-        """Convenience: validate plus an offline grace window.
-
-        - Online and valid    -> True, last_ok timestamp refreshed.
-        - Online and invalid  -> False.
-        - Network error       -> True if last_ok is within the grace window,
-                                 False otherwise.
-        """
         try:
             res = self.validate(key)
         except requests.RequestException:
             return self._within_grace()
-
         if res.get("valid"):
             self._touch_last_ok()
             return True
         return False
 
     def machine_id(self) -> str:
-        """Stable per-machine id, persisted under the user's config dir."""
-        p = self.config_dir / "machine.id"
+        """Stable per-machine id, persisted under the user's state dir."""
+        p = self.config_dir / "m.id"
         if not p.exists():
             p.write_text(uuid.uuid4().hex)
         return p.read_text().strip()
@@ -119,7 +90,7 @@ class LicenseClient:
         r.raise_for_status()
         data = r.json()
         if not self._verify(dict(data)):
-            raise LicenseError("signature mismatch - response cannot be trusted")
+            raise LicenseError("response signature could not be verified")
         return data
 
     def _verify(self, resp: dict[str, Any]) -> bool:
@@ -129,10 +100,10 @@ class LicenseClient:
         return hmac.compare_digest(sig, expected)
 
     def _touch_last_ok(self) -> None:
-        (self.config_dir / "last_ok").write_text(str(int(time.time())))
+        (self.config_dir / "h").write_text(str(int(time.time())))
 
     def _within_grace(self) -> bool:
-        p = self.config_dir / "last_ok"
+        p = self.config_dir / "h"
         if not p.exists():
             return False
         try:
@@ -153,14 +124,11 @@ if __name__ == "__main__":
     ap.add_argument("--api", default=os.getenv("LICENSE_API", ""))
     ap.add_argument("--key-secret", dest="signing_key",
                     default=os.getenv("LICENSE_SIGNING_KEY", ""))
-    ap.add_argument("--product", default=os.getenv("LICENSE_PRODUCT", "gptcode"))
+    ap.add_argument("--product", default=os.getenv("LICENSE_PRODUCT", ""))
     args = ap.parse_args()
 
-    if not args.signing_key or not args.api:
-        sys.exit(
-            "Set LICENSE_API and LICENSE_SIGNING_KEY env vars (or pass --api / "
-            "--key-secret). The signing key must match SIGNING_KEY on the server."
-        )
+    if not args.signing_key or not args.api or not args.product:
+        sys.exit("Set LICENSE_API, LICENSE_SIGNING_KEY and LICENSE_PRODUCT (or pass --api / --key-secret / --product).")
 
     client = LicenseClient(args.api, args.signing_key, args.product)
     fn = getattr(client, args.action)
