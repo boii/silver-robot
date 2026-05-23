@@ -1,8 +1,8 @@
-"""KISS license client for Python 3.9+.
+"""License client for Python 3.9+.
 
-Talks to the license server from https://github.com/boii/license. The server
-signs every response with HMAC-SHA256, and we verify that signature with the
-shared SIGNING_KEY before trusting any answer.
+Talks to the project's licensing service. The server signs every response
+with HMAC-SHA256, and we verify that signature with the shared SIGNING_KEY
+before trusting any answer.
 
 Usage:
 

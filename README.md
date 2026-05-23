@@ -11,9 +11,8 @@ CapSolver-backed reCAPTCHA v2.
 - Multi-thread workers with shared TCP/TLS connections.
 - Optional DataImpulse rotating proxy with sticky sub-sessions per worker.
 - Rich UI progress bar / summary, with a plain-text fallback.
-- License gate using the KISS license server
-  (<https://github.com/boii/license>) with HMAC-signed responses and an
-  offline grace period.
+- License gate with HMAC-signed responses, online check on every startup,
+  and a background watchdog that re-validates while work is in progress.
 
 ## Quick start (Windows)
 
@@ -39,7 +38,7 @@ run.bat -n 50 -w 5
 | Path                | Role                                                      |
 |---------------------|-----------------------------------------------------------|
 | `main.py`           | Entry point: license check, worker pool, summary          |
-| `license_client.py` | KISS license client (HMAC-verified)                       |
+| `license_client.py` | License client (HMAC-verified)                            |
 | `_prompt.py`        | Interactive prompt invoked by `run.bat`                   |
 | `run.bat`           | Setup + launcher (single batch file)                      |
 | `.env.example`      | Sample env config                                         |
@@ -48,8 +47,7 @@ run.bat -n 50 -w 5
 
 ## License gating
 
-The gate is enforced inside `main.py:check_license_or_exit()`. It uses the
-KISS license server protocol from <https://github.com/boii/license>:
+The gate is enforced inside `main.py:check_license_or_exit()`:
 
 - `POST /v1/activate` on first run, `POST /v1/validate` on subsequent runs.
 - The first time the app starts, it prompts for the license key and stores
@@ -69,4 +67,3 @@ Buy or top up a key at <https://t.me/putrm>.
 ## Credits
 
 - Author: [@putrm](https://t.me/putrm)
-- License server: <https://github.com/boii/license>

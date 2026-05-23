@@ -1,7 +1,7 @@
 """GPT Promo Grabber: pure-HTTP code harvester.
 
 Flow:
-  1. License check (KISS license server, see license_client.py).
+  1. License check against the project's licensing service.
   2. Solve reCAPTCHA via CapSolver (sitekey + URL hardcoded, base64).
   3. POST email + token to the upstream promo endpoint.
   4. Parse `code` from the JSON response, append to codes.txt.
@@ -11,7 +11,6 @@ Total time ~CapSolver time + a couple seconds of HTTP overhead.
 
 Author : @putrm   (https://t.me/putrm)
 Buy    : https://t.me/putrm
-License: KISS (https://github.com/boii/license)
 """
 
 import argparse
@@ -52,7 +51,7 @@ except ImportError:  # pragma: no cover
 
 console = Console() if _HAS_RICH else None
 
-# License client (KISS license server). See license_client.py.
+# License client. See license_client.py.
 from license_client import LicenseClient, LicenseError
 
 # Credits / contact (kept as constants so the banner stays in sync)
