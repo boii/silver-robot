@@ -1,4 +1,4 @@
-"""Prompt interaktif berwarna untuk run.bat. Output pilihan ke .last_args."""
+"""Coloured interactive prompt for run.bat. Writes the chosen flags to .last_args."""
 import sys
 
 try:
@@ -12,31 +12,38 @@ except ImportError:
     HAS_RICH = False
 
 
+APP_NAME = "GPT Promo Grabber"
+AUTHOR_HANDLE = "@putrm"
+CONTACT_URL = "https://t.me/putrm"
+
+
 def main():
     if HAS_RICH:
         console = Console()
         title = Text()
-        title.append("BBVA ", style="bold blue")
-        title.append("OpenAI ", style="bold cyan")
-        title.append("Code Grabber", style="bold white")
+        title.append(APP_NAME, style="bold cyan")
         title.append("\n")
         title.append("Pure HTTP + Multi-thread", style="dim italic")
+        title.append("\n")
+        title.append(f"by {AUTHOR_HANDLE}  ", style="bold white")
+        title.append(f"|  buy: {CONTACT_URL}", style="bold green")
         console.print()
-        console.print(Panel(Align.center(title), border_style="blue", padding=(0, 2)))
+        console.print(Panel(Align.center(title), border_style="cyan", padding=(0, 2)))
         console.print()
-        runs = IntPrompt.ask("[cyan]Jumlah kode[/cyan]", default=1, console=console)
-        workers = IntPrompt.ask("[cyan]Jumlah thread paralel[/cyan]", default=1, console=console)
+        runs = IntPrompt.ask("[cyan]Codes to grab[/cyan]", default=1, console=console)
+        workers = IntPrompt.ask("[cyan]Parallel workers[/cyan]", default=1, console=console)
     else:
         print()
-        print("=== BBVA OpenAI Code Grabber ===")
+        print(f"=== {APP_NAME} ===")
+        print(f"by {AUTHOR_HANDLE}  |  buy: {CONTACT_URL}")
         print()
-        runs_raw = input("Jumlah kode [1]: ").strip() or "1"
-        workers_raw = input("Jumlah thread paralel [1]: ").strip() or "1"
+        runs_raw = input("Codes to grab [1]: ").strip() or "1"
+        workers_raw = input("Parallel workers [1]: ").strip() or "1"
         try:
             runs = int(runs_raw)
             workers = int(workers_raw)
         except ValueError:
-            print("Input bukan angka.")
+            print("Not a number.")
             sys.exit(1)
 
     runs = max(1, runs)

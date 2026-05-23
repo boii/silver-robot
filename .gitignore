@@ -10,11 +10,10 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Runtime output / scraped data
+# Runtime output
 codes.txt
 errors.txt
-network.json
-network_full.txt
+.last_args
 
 # IDE
 .vscode/
